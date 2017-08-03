@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 
 make
-sudo ../bin/Debug/mbp-pidcoold
+../bin/Debug/mbp-pidcoold

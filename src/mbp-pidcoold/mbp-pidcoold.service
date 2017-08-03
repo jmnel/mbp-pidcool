@@ -1,0 +1,9 @@
+[Unit]
+Description=PID fan controller daemon service for Macbook Pro Retina
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/mbp-pidcoold
+
+[Install]
+WantedBy=multi-user.target

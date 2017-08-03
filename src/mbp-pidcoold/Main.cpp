@@ -5,7 +5,13 @@
 #include <memory>
 #include <string>
 #include <time.h>
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <unistd.h>
+#include <syslog.h>
 
 using std::array;
 using std::cout;
@@ -24,26 +30,57 @@ T clamp(T const &x, T const &low, T const &up) {
     return v;
 }
 
+#define DAEMON_NAME "mbp-pidcoold"
+
 const double rpmMinLeft = 2000.0;
 const double rpmMinRight = 2000.0;
 const double rpmMaxLeft = 7000.0;
 const double rpmMaxRight = 7000.0;
 
-const double kP = 10.0;
-const double kI = 10.0;
-const double kD = 2.0;
+const double kP = 0.01;
+const double kI = 0.001;
+const double kD = 0.004;
 
 const double tStep = 1.0;
 
-const double tempGoal = 48.0;
+const double tempGoal = 60.0;
 
 // -- entry point --
 int main(int argc, char *argv[]) {
+    setlogmask(LOG_UPTO(LOG_NOTICE));
+    openlog(DAEMON_NAME, LOG_CONS | LOG_NDELAY | LOG_PERROR | LOG_PID,
+            LOG_USER);
+    cout << "gid = " << getuid << endl;
     if (getuid != 0) {
-        // cout << "mbp-pidcoold not started with root privileges. ";
-        // cout << "mpd-pidcoold as root. Exiting." << endl;
+        cout << "mbp-pidcoold not started with root privileges. ";
+        cout << "mpd-pidcoold as root. Exiting." << endl;
         // return EXIT_FAILURE;
     }
+
+    pid_t pid, sid;
+    pid = fork();
+    if (pid < 0) {
+        cout << "Error: Daemon failed to fork. Exiting." << endl;
+        exit(EXIT_FAILURE);
+    }
+    if (pid > 0) {
+        exit(EXIT_SUCCESS);
+    }
+
+    umask(0);
+
+    sid = setsid();
+    if (sid < 0) {
+        exit(EXIT_FAILURE);
+    }
+
+    if ((chdir("/")) < 0) {
+        exit(EXIT_FAILURE);
+    }
+
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
 
     double integ = 0.0;
 
@@ -51,14 +88,16 @@ int main(int argc, char *argv[]) {
 
     double eOld = 0.0;
 
-    double tempAvg[10] = {0.0};
+    double tempAvg[10] = {tempOld};
 
     runCmd("tee /sys/devices/platform/applesmc.768/fan1_manual <<< 1");
     runCmd("tee /sys/devices/platform/applesmc.768/fan2_manual <<< 1");
 
+    bool limit = false;
     while (true) {
-        auto tDelta = tStep;
+        double tDelta = tStep;
 
+        assert(tDelta > 0.0);
         double tempSample = getCpuTemp();
 
         for (size_t i = 1; i < 10; i++) {
@@ -74,24 +113,32 @@ int main(int argc, char *argv[]) {
         auto temp = sum / 10.0;
 
         // calculate present error value
-        auto e = temp - tempGoal;
+        double e = temp - tempGoal;
 
-        integ += tDelta * e;
+
+        if (!limit) {
+            integ = integ + tDelta * e;
+        }
+
+
 
         auto deriv = (e - eOld) / tDelta;
 
         auto u = kP * e + kI * integ + kD * deriv;
 
-        cout << "t=" << temp << "°C" << endl;
-        cout << "u=" << u << endl;
+        limit = (u <= 0.0 || u >= 1.0);
 
-        double l = clamp(2000.0 + u * 20.0, rpmMinLeft, rpmMaxLeft);
-        double r = clamp(2000.0 + u * 20.0, rpmMinRight, rpmMaxRight);
+        // cout << "int=" << integ << endl;
+        // cout << "u_pre=" << u << endl;
+        u = clamp(u, 0.0, 1.0);
+
+        // cout << "t=" << temp << "°C" << endl;
+
+        double l = u * (rpmMaxLeft - rpmMinLeft) + rpmMinLeft;
+        double r = u * (rpmMaxRight - rpmMinRight) + rpmMinRight;
 
         int left = (int)(l + 0.5);
         int right = (int)(r + 0.5);
-
-        cout << "l=" << l << ", r=" << r << endl;
 
         setRpm(left, right);
 
@@ -103,8 +150,8 @@ int main(int argc, char *argv[]) {
         nanosleep(&sleepTime, nullptr);
     }
 
-    // auto temp = getCpuTemp();
-    // cout << "temp=" << temp << "°C" << endl;
+    syslog(LOG_NOTICE, "Exiting daemon.");
+    closelog();
 
     return EXIT_SUCCESS;
 }
